@@ -1,0 +1,91 @@
+#!/usr/bin/perl
+# Generate vim-style `tags' file from Erlang source files
+# $Id: erltags,v 1.2 2010/09/27 09:09:08 ecsahoc Exp $
+use warnings;
+use strict;
+use Getopt::Std;
+$Getopt::Std::STANDARD_HELP_VERSION = 1;
+
+my %opts = (s => 0,
+            f => 0);
+getopts('sfo:', \%opts);
+
+open my $tagf, '> ' . (defined $opts{o} ? $opts{o} : '-')
+    or die "Cannot write file $opts{o}: $!\n";
+
+my %tags;
+while (<>) {
+    chomp;
+    my $fn = $_;
+    open my $f, '<', $fn or (print(STDERR "$fn: $!\n"), next);
+
+    # Module tag
+    my ($mod, $type) = $fn =~ m{([^/]+)\.([he]rl)$};
+    push @{$tags{$mod}{$fn}}, "/^-module/" if $type eq 'erl';
+
+    # File name tag
+    push @{$tags{"$mod.$type"}{$fn}}, "1" if $opts{f};
+
+    while (<$f>) {
+        # Function tags
+        if (/^([a-z][a-zA-Z0-9_@]*)\s*\(/) {
+            my $fun = $1;
+            my $tag = "$mod:$fun";
+
+            # Use only the first definition clause
+            next if exists($tags{$tag});
+
+            my $pattern = "/^$fun\\>/";
+            # module:function tag
+            $tags{$tag}{$fn} = [$pattern] unless ($type eq 'hrl');
+            # static function tag
+            push @{$tags{$fun}{$fn}}, "$pattern  ;\"\tfile:";
+        }
+        # Record tags
+        elsif (/^-record\s*\(\s*([a-z][a-zA-Z0-9_@]*)/) {
+            my $rec = $1;
+            my $pattern = "/^-record\\.\\*\\<$rec\\>/";
+            $pattern .= "  ;\"\tfile:" if ($type eq 'erl');
+            push @{$tags{$rec}{$fn}}, $pattern;
+            push @{$tags{"#$rec"}{$fn}}, $pattern if $opts{s};
+        }
+        # Macro tags
+        elsif (/^-define\s*\(\s*([a-zA-Z0-9_@]+)/) {
+            my $macro = $1;
+            my $pattern = "/^-define\\.\\*\\<$macro\\>/";
+            $pattern .= "  ;\"\tfile:" if ($type eq 'erl');
+            push @{$tags{$macro}{$fn}}, $pattern;
+            push @{$tags{"?$macro"}{$fn}}, $pattern if $opts{s};
+        }
+    }
+    close $f;
+}
+
+for my $tag (sort(keys(%tags))) {
+    for my $fn (keys(%{$tags{$tag}})) {
+        print $tagf map("$tag\t$fn\t$_\n", @{$tags{$tag}{$fn}});
+    }
+}
+close $tagf;
+
+sub HELP_MESSAGE {
+    my $fh = shift;
+    print $fh <<HELP
+Use: erltags [-s] [-f] [-o file]
+File names are read from standard input, VIM-style sorted tags are written
+to the standard output.
+
+Example:
+  find ~/cvscheckout -name *.[he]rl | erltags -f -o tags
+
+Options:
+  -o    Write output to file
+  -s    Include tags with special characters (?MACRO, #record)
+  -f    Include file names as tags (file.erl, file.hrl)
+HELP
+}
+
+sub VERSION_MESSAGE {
+    my $fh = shift;
+    print $fh "erltags version 0.1\n";
+}
