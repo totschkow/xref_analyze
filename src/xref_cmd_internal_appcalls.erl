@@ -23,7 +23,13 @@
 
 -behaviour(xref_gen_cmd).
 
--type callgraph_el()   :: {mfa(), list()}.
+
+-type callgraph_node() :: {Module :: atom(),
+                            Function :: atom(),
+                            Arity :: integer(),
+                            Application :: atom()}.
+
+-type callgraph_el()   :: {callgraph_node(), list()}.
 
 -export([command_name/0,
          execute/1,
@@ -89,7 +95,6 @@ opt_types() ->
     [{generate_clusters, boolean},
      {temp_dir, string}].
 
-
 -spec analyze(
     OutputFile :: string(),
     Opts :: options(),
@@ -100,21 +105,26 @@ opt_types() ->
     Entries :: list(mfa())
 ) -> ok.
 analyze(_OutputFile, Opts, Mods, _Apps, ModApps, _Dir, Entries) ->
-    io:format("~p ~p ModApps: '~p' ~n", [?MODULE, ?LINE, ModApps]),
     xref:start(s),
     xref:set_default(s, [{verbose, false}, {warnings, false}]),
     [xref:add_module(s, M) || M <- Mods],
-    CallGraphs = lists:flatten([walk_call_graph(Entry, Mods, Opts, []) || Entry <- Entries]),
-    CrossCalls = find_cross_calls(undefined, CallGraphs, ModApps, []),
-    io:format("~p ~p CrossCalls: '~p' ~n", [?MODULE, ?LINE, CrossCalls]),
+    CallGraphs = lists:flatten(
+                   [walk_call_graph(Entry, Mods, Opts, ModApps, []) ||
+                    Entry <- Entries]),
+    CrossCalls = find_cross_calls(undefined, CallGraphs, []),
     print_cross_calls(CrossCalls),
     ok.
 
--spec walk_call_graph(mfa(), list(module()), options(), list(mfa())) ->
-    list(callgraph_el()).
-walk_call_graph({_, module_info, _}, _Modules, _Opts, _CallPath) ->
+-spec walk_call_graph(Mfa, Modules, Opts, ModApps, CallPath) -> Result when
+      Mfa :: mfa(),
+      Modules :: list(module()),
+      Opts :: options(),
+      ModApps :: list({module(), atom()}),
+      CallPath :: list(mfa()),
+      Result :: list(callgraph_el()).
+walk_call_graph({_, module_info, _}, _Modules, _Opts, _ModApps, _CallPath) ->
     [];
-walk_call_graph(MFA, Modules, Opts, CallPath) ->
+walk_call_graph({Mod, Fun, Ar} = MFA, Modules, Opts, ModApps, CallPath) ->
     {ok, Functions} = xref:analyze(s, {call, MFA}),
     Res =
         lists:foldl(fun({M, _F, _A} = Function, Acc) ->
@@ -122,7 +132,8 @@ walk_call_graph(MFA, Modules, Opts, CallPath) ->
                     true ->
                         case lists:member(Function, CallPath) of
                             false ->
-                                [{MFA, walk_call_graph(Function, Modules, Opts, [Function | CallPath])} | Acc];
+                                App = find_app_of_mod(Mod, ModApps),
+                                [{{Mod, Fun, Ar, App}, walk_call_graph(Function, Modules, Opts, ModApps, [Function | CallPath])} | Acc];
                             true ->
                                 Acc
                         end;
@@ -132,43 +143,42 @@ walk_call_graph(MFA, Modules, Opts, CallPath) ->
             end, [], Functions),
     Res.
 
--spec find_cross_calls(undefined | callgraph_el(), list(callgraph_el()), list({module(), atom()}), list(mfa())) ->
-    list(mfa()).
-find_cross_calls(_Prev, [], _ModApps, Res) ->
+-spec find_cross_calls(Prev, CallGraphs, ResAcc) -> Result when
+      Prev :: undefined | callgraph_node() | callgraph_el(),
+      CallGraphs :: list(callgraph_el()),
+      ResAcc :: list({callgraph_node(), callgraph_node()}),
+      Result :: list({callgraph_node(), callgraph_node()}).
+find_cross_calls(_Prev, [], Res) ->
     Res;
-find_cross_calls(Prev, [{MFA, Children} | T], ModApps, Res) ->
-    io:format("~p ~p MFA: '~p' ~n", [?MODULE, ?LINE, MFA]),
-    io:format("~p ~p Children: '~p' ~n", [?MODULE, ?LINE, Children]),
-    ChildCrossCalls = find_cross_calls(MFA, Children, ModApps, []),
-    case is_cross_call(Prev, MFA, ModApps) of
+find_cross_calls(Prev, [{{_, _, _, ChildApp} = MFA, Children} | T], Res) ->
+    ChildCrossCalls = find_cross_calls(MFA, Children, []),
+    ParentApp = get_parent_app(Prev),
+    case ParentApp =:= ChildApp of
         true ->
-            find_cross_calls(Prev, T, ModApps, [{Prev, MFA}] ++ ChildCrossCalls ++ Res);
+            find_cross_calls(Prev, T, [{Prev, MFA}] ++ ChildCrossCalls ++ Res);
         false ->
-            find_cross_calls(Prev, T, ModApps, ChildCrossCalls ++ Res)
-    end.
-
--spec is_cross_call(undefined | mfa(), mfa(), list({module(), atom()})) ->
-    boolean().
-is_cross_call(undefined, _Child, _ModApps) ->
-    false;
-is_cross_call({Parent, _, _}, {Child, _, _}, ModApps) ->
-    find_app_of_mod(Parent, ModApps),
-    find_app_of_mod(Child, ModApps),
-    case {find_app_of_mod(Parent, ModApps), find_app_of_mod(Child, ModApps)} of
-        {{_, ParentApp}, {_, ChildApp}} when ParentApp =/= ChildApp -> true;
-        _Other ->
-            false
+            find_cross_calls(Prev, T, ChildCrossCalls ++ Res)
     end.
 
 -spec find_app_of_mod(module(), list({module(), atom()})) ->
     false | {module(), atom()}.
 find_app_of_mod(Mod, ModApps) ->
-    lists:keyfind(Mod, 1, ModApps).
+    {_, App} = lists:keyfind(Mod, 1, ModApps),
+    App.
 
--spec print_cross_calls(list({mfa(), mfa()})) ->
+-spec print_cross_calls(list({callgraph_node(), callgraph_node()})) ->
     ok.
 print_cross_calls(Calls) ->
-    lists:map(fun({Parent, Child}) ->
+    lists:map(fun({{PMod, PFun, PAr, _}, {CMod, CFun, CAr, _}}) ->
             io:format("~45s  ==> ~45s\n",
-                      [xref_analyze_lib:fmt_mfa(Parent), xref_analyze_lib:fmt_mfa(Child)])
-        end, Calls).
+                      [xref_analyze_lib:fmt_mfa({PMod, PFun, PAr}), xref_analyze_lib:fmt_mfa({CMod, CFun, CAr})])
+        end, lists:usort(Calls)),
+    ok.
+
+-spec get_parent_app(Function) -> Result when
+      Function :: undefined | callgraph_node(),
+      Result :: atom().
+get_parent_app({_, _, _, App}) ->
+    App;
+get_parent_app(undefined) ->
+    undefined.
