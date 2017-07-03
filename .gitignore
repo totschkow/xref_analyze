@@ -6,13 +6,7 @@ xref_analyze
 .eunit
 .rebar/
 tags
-ebin/xref_analyze.app
 erltags
-ebin/xref_*.gv
-ebin/xref_*.png
-ebin/xref_*.ps
-ebin/xref_*.pdf
-ebin/xref_*.txt
 xref_*.gv
 xref_*.png
 xref_*.ps
@@ -20,3 +14,7 @@ xref_*.pdf
 xref_an*.txt
 src/proba.erl
 doc/*
+dialyzer_output.txt
+rebar.lock
+rebar3
+filtered_warnings.txt
